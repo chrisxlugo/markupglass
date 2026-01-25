@@ -1,0 +1,21 @@
+<UserControl x:Class="MarkupGlass.Controls.ShapeAnnotationControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             MinWidth="6" MinHeight="6">
+  <Canvas>
+    <Border x:Name="HitTarget"
+            Background="Transparent"
+            Width="{Binding ActualWidth, RelativeSource={RelativeSource AncestorType=UserControl}}"
+            Height="{Binding ActualHeight, RelativeSource={RelativeSource AncestorType=UserControl}}" />
+    <Path x:Name="ShapePath"
+          Stroke="White"
+          StrokeThickness="2"
+          Fill="Transparent" />
+    <Thumb x:Name="ResizeThumb"
+           Width="12"
+           Height="12"
+           Cursor="SizeNWSE"
+           Background="#CCFFFFFF"
+           Visibility="Collapsed" />
+  </Canvas>
+</UserControl>

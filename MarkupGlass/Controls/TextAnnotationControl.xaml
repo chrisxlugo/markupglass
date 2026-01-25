@@ -1,0 +1,31 @@
+<UserControl x:Class="MarkupGlass.Controls.TextAnnotationControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             MinWidth="50" MinHeight="30">
+  <Border x:Name="RootBorder"
+          BorderBrush="#66FFFFFF"
+          BorderThickness="1"
+          CornerRadius="6"
+          Background="Transparent"
+          Padding="6">
+    <Grid>
+      <TextBox x:Name="Editor"
+               Panel.ZIndex="0"
+               TextWrapping="Wrap"
+               BorderThickness="0"
+               Background="Transparent"
+               Foreground="White"
+               AcceptsReturn="True"
+               IsReadOnly="True" />
+      <Thumb x:Name="ResizeThumb"
+             Panel.ZIndex="1"
+             Width="12"
+             Height="12"
+             HorizontalAlignment="Right"
+             VerticalAlignment="Bottom"
+             Cursor="SizeNWSE"
+             Background="#CCFFFFFF"
+             Visibility="Collapsed" />
+    </Grid>
+  </Border>
+</UserControl>
