@@ -157,7 +157,14 @@ public partial class MainWindow : Window
         }
 
         var key = (uint)KeyInterop.VirtualKeyFromKey(binding.Key);
-        _hotkeyManager.Register(binding.Modifiers, key, handler);
+        try
+        {
+            _hotkeyManager.Register(binding.Modifiers, key, handler);
+        }
+        catch (InvalidOperationException)
+        {
+            // Hotkey is already in use by another app; skip to avoid crashing on startup.
+        }
     }
 
     private void ApplyHotkeysAndSave()
