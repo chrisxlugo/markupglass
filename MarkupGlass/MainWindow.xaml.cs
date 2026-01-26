@@ -99,6 +99,7 @@ public partial class MainWindow : Window
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         SetFullScreen();
+        PositionToolbarOnPrimary();
         LoadSession();
         _undoManager.Push(BuildSession());
     }
@@ -416,6 +417,15 @@ public partial class MainWindow : Window
         Top = SystemParameters.VirtualScreenTop;
         Width = SystemParameters.VirtualScreenWidth;
         Height = SystemParameters.VirtualScreenHeight;
+    }
+
+    private void PositionToolbarOnPrimary()
+    {
+        var primary = Forms.Screen.PrimaryScreen.Bounds;
+        var left = primary.Left - SystemParameters.VirtualScreenLeft + 20;
+        var top = primary.Top - SystemParameters.VirtualScreenTop + 20;
+        Canvas.SetLeft(Toolbar, left);
+        Canvas.SetTop(Toolbar, top);
     }
 
     private void HookToolbarDrag()
