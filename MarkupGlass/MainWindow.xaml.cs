@@ -66,6 +66,9 @@ public partial class MainWindow : Window
     private bool _settingsDragging;
     private Point _settingsDragStart;
     private Point _settingsOrigin;
+    private bool _moveTextMode;
+    private bool _suppressTextCreateOnClick;
+    private bool _moveTextChordHeld;
 
     public MainWindow()
     {
@@ -85,6 +88,8 @@ public partial class MainWindow : Window
         PreviewMouseLeftButtonDown += OnWindowPreviewMouseDown;
         PreviewMouseMove += OnWindowPreviewMouseMove;
         PreviewMouseLeftButtonUp += OnWindowPreviewMouseUp;
+        PreviewKeyDown += OnWindowPreviewKeyDown;
+        PreviewKeyUp += OnWindowPreviewKeyUp;
 
         HookToolbarDrag();
         HookToolbarButtons();
@@ -603,6 +608,10 @@ public partial class MainWindow : Window
         _toolMode = mode;
         DeselectText();
         DeselectShape();
+        if (mode != ToolMode.Text)
+        {
+            SetMoveTextMode(false);
+        }
         if (mode != ToolMode.Cursor)
         {
             _lastNonCursorTool = mode;
@@ -653,6 +662,46 @@ public partial class MainWindow : Window
 
     private void OnWindowPreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
+        if (_toolMode == ToolMode.Text)
+        {
+            var moveHeld = IsMoveTextChordHeld();
+            if (!moveHeld)
+            {
+                var altHeld = Keyboard.Modifiers.HasFlag(ModifierKeys.Alt);
+                var overText = FindAncestor<TextAnnotationControl>(e.OriginalSource as DependencyObject) != null;
+                moveHeld = altHeld && overText;
+            }
+            if (moveHeld != _moveTextMode)
+            {
+                SetMoveTextMode(moveHeld);
+            }
+        }
+
+        if (_selectedText != null && _selectedText.IsEditing)
+        {
+            var clickedText = FindAncestor<TextAnnotationControl>(e.OriginalSource as DependencyObject);
+            if (!ReferenceEquals(clickedText, _selectedText))
+            {
+                _selectedText.EndEdit();
+                Keyboard.ClearFocus();
+                SetCursorForTool(_toolMode);
+                Focus();
+                if (_selectedText.IsMouseCaptured)
+                {
+                    _selectedText.ReleaseMouseCapture();
+                }
+                _suppressTextCreateOnClick = true;
+            }
+        }
+        else if (_selectedText != null && _selectedText.IsMouseCaptured)
+        {
+            var clickedText = FindAncestor<TextAnnotationControl>(e.OriginalSource as DependencyObject);
+            if (!ReferenceEquals(clickedText, _selectedText))
+            {
+                _selectedText.ReleaseMouseCapture();
+            }
+        }
+
         if (_toolMode == ToolMode.Eraser && e.LeftButton == MouseButtonState.Pressed)
         {
             var removed = TryEraseText(e.GetPosition(TextLayer)) || TryEraseShape(e.GetPosition(ShapeLayer));
@@ -708,7 +757,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (_toolMode != ToolMode.Text || e.LeftButton != MouseButtonState.Pressed)
+        if (_toolMode != ToolMode.Text || _moveTextMode || e.LeftButton != MouseButtonState.Pressed)
         {
             if (!IsWithinToolbar(e.OriginalSource as DependencyObject, e.GetPosition(UiLayer)) &&
                 FindAncestor<TextAnnotationControl>(e.OriginalSource as DependencyObject) == null)
@@ -732,12 +781,6 @@ public partial class MainWindow : Window
         }
 
         var existingText = FindAncestor<TextAnnotationControl>(e.OriginalSource as DependencyObject);
-        if (_selectedText != null && _selectedText.IsEditing && existingText == null)
-        {
-            DeselectText();
-            e.Handled = true;
-            return;
-        }
         if (existingText != null)
         {
             SelectText(existingText);
@@ -746,6 +789,12 @@ public partial class MainWindow : Window
                 existingText.BeginEdit();
                 e.Handled = true;
             }
+            return;
+        }
+
+        if (_suppressTextCreateOnClick)
+        {
+            _suppressTextCreateOnClick = false;
             return;
         }
 
@@ -762,6 +811,32 @@ public partial class MainWindow : Window
 
     private void OnWindowPreviewMouseMove(object sender, MouseEventArgs e)
     {
+        if (_toolMode == ToolMode.Text)
+        {
+            var moveHeld = IsMoveTextChordHeld();
+            if (moveHeld != _moveTextMode)
+            {
+                SetMoveTextMode(moveHeld);
+            }
+        }
+
+        if (_selectedText != null && _selectedText.IsEditing)
+        {
+            var position = e.GetPosition(TextLayer);
+            if (!IsPointWithinControl(_selectedText, position))
+            {
+                _selectedText.EndEdit();
+                Keyboard.ClearFocus();
+                SetCursorForTool(_toolMode);
+                Focus();
+                if (_selectedText.IsMouseCaptured)
+                {
+                    _selectedText.ReleaseMouseCapture();
+                }
+                _suppressTextCreateOnClick = true;
+            }
+        }
+
         if (_toolMode == ToolMode.Eraser && e.LeftButton == MouseButtonState.Pressed)
         {
             var removed = TryEraseText(e.GetPosition(TextLayer)) || TryEraseShape(e.GetPosition(ShapeLayer));
@@ -791,8 +866,114 @@ public partial class MainWindow : Window
         e.Handled = true;
     }
 
+    private void OnWindowPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape)
+        {
+            if (_selectedText != null && _selectedText.IsEditing)
+            {
+                _selectedText.EndEdit();
+                Focus();
+                e.Handled = true;
+            }
+
+            return;
+        }
+
+        if (_toolMode == ToolMode.Text && IsMoveTextChordKey(e))
+        {
+            _moveTextChordHeld = true;
+            SetMoveTextMode(true);
+            e.Handled = true;
+        }
+
+    }
+
+    private void OnWindowPreviewKeyUp(object sender, KeyEventArgs e)
+    {
+        if (_toolMode == ToolMode.Text && IsMoveTextChordRelease(e))
+        {
+            _moveTextChordHeld = false;
+            SetMoveTextMode(false);
+            e.Handled = true;
+        }
+    }
+
+    private static bool IsMoveTextChordKey(KeyEventArgs e)
+    {
+        if (!Keyboard.Modifiers.HasFlag(ModifierKeys.Alt))
+        {
+            return false;
+        }
+
+        return e.Key == Key.X || (e.Key == Key.System && e.SystemKey == Key.X);
+    }
+
+    private static bool IsMoveTextChordRelease(KeyEventArgs e)
+    {
+        if (e.Key == Key.X || (e.Key == Key.System && e.SystemKey == Key.X))
+        {
+            return true;
+        }
+
+        return e.Key == Key.LeftAlt || e.Key == Key.RightAlt ||
+               (e.Key == Key.System && (e.SystemKey == Key.LeftAlt || e.SystemKey == Key.RightAlt));
+    }
+
+    private bool IsMoveTextChordHeld()
+    {
+        if (_moveTextChordHeld)
+        {
+            return true;
+        }
+
+        var altDown = Keyboard.Modifiers.HasFlag(ModifierKeys.Alt) ||
+            Keyboard.IsKeyDown(Key.LeftAlt) || Keyboard.IsKeyDown(Key.RightAlt);
+        if (altDown && Keyboard.IsKeyDown(Key.X))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private void SetMoveTextMode(bool enabled)
+    {
+        if (_moveTextMode == enabled)
+        {
+            return;
+        }
+
+        _moveTextMode = enabled;
+        if (_moveTextMode && _selectedText != null && _selectedText.IsEditing)
+        {
+            _selectedText.EndEdit();
+        }
+
+        foreach (var control in TextLayer.Children.OfType<TextAnnotationControl>())
+        {
+            control.CanEdit = !_moveTextMode;
+            control.CanDrag = _moveTextMode;
+            if (_moveTextMode && control.IsEditing)
+            {
+                control.EndEdit();
+            }
+            if (!enabled && control.IsMouseCaptured)
+            {
+                control.ReleaseMouseCapture();
+            }
+        }
+
+        TextLayer.IsHitTestVisible = _toolMode == ToolMode.Text;
+    }
+
     private async void OnWindowPreviewMouseUp(object sender, MouseButtonEventArgs e)
     {
+        if (_toolMode == ToolMode.Text && _moveTextMode && !IsMoveTextChordHeld())
+        {
+            SetMoveTextMode(false);
+        }
+
         if (_isPlacingShape && IsMouseCaptured && e.ChangedButton == MouseButton.Left)
         {
             ReleaseMouseCapture();
@@ -823,6 +1004,8 @@ public partial class MainWindow : Window
         control.FontSizeValue = _selectedFontSize;
         control.TextBrush = new SolidColorBrush(_selectedColor);
         control.HasBackground = TextBackgroundToggle.IsChecked == true;
+        control.CanEdit = !_moveTextMode;
+        control.CanDrag = _moveTextMode;
         control.Selected += (_, _) => SelectText(control);
         control.DragCompleted += (_, _) => ScheduleSave();
         control.ResizeCompleted += (_, _) => ScheduleSave();

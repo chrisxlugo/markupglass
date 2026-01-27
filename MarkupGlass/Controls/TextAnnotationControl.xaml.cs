@@ -1,4 +1,5 @@
 using System;
+using System.Windows;
 using Point = System.Windows.Point;
 using Brush = System.Windows.Media.Brush;
 using Brushes = System.Windows.Media.Brushes;
@@ -19,7 +20,10 @@ namespace MarkupGlass.Controls;
 
 public partial class TextAnnotationControl : UserControl
 {
+    private static readonly double DragThresholdX = SystemParameters.MinimumHorizontalDragDistance;
+    private static readonly double DragThresholdY = SystemParameters.MinimumVerticalDragDistance;
     private bool _isDragging;
+    private bool _isPointerDown;
     private Point _dragStart;
     private Point _dragOrigin;
     private bool _isSelected;
@@ -37,7 +41,7 @@ public partial class TextAnnotationControl : UserControl
         RootBorder.MouseLeftButtonDown += OnMouseDown;
         RootBorder.MouseMove += OnMouseMove;
         RootBorder.MouseLeftButtonUp += OnMouseUp;
-        RootBorder.MouseLeftButtonDown += OnMouseLeftButtonDown;
+        RootBorder.LostMouseCapture += (_, _) => ResetDragState();
         ResizeThumb.DragDelta += OnResizeDelta;
         ResizeThumb.DragCompleted += (_, _) => ResizeCompleted?.Invoke(this, EventArgs.Empty);
         Editor.LostKeyboardFocus += (_, _) => EndEdit();
@@ -58,6 +62,9 @@ public partial class TextAnnotationControl : UserControl
 
     public bool IsEditing => !Editor.IsReadOnly;
 
+    public bool CanEdit { get; set; } = true;
+    public bool CanDrag { get; set; } = true;
+
     public Brush TextBrush
     {
         get => Editor.Foreground;
@@ -77,6 +84,11 @@ public partial class TextAnnotationControl : UserControl
 
     public void BeginEdit()
     {
+        if (!CanEdit)
+        {
+            return;
+        }
+
         SetEditorInteraction(true);
         Editor.Focus();
         Editor.CaretIndex = Editor.Text.Length;
@@ -131,36 +143,53 @@ public partial class TextAnnotationControl : UserControl
 
     private void OnMouseDown(object sender, MouseButtonEventArgs e)
     {
-        if (!Editor.IsReadOnly)
+        if (e.OriginalSource is System.Windows.Controls.Primitives.Thumb)
         {
-            EndEdit();
+            return;
         }
 
         Selected?.Invoke(this, EventArgs.Empty);
-        _isDragging = true;
+        if (IsEditing || !CanDrag)
+        {
+            return;
+        }
+
+        if (e.ClickCount == 2 && CanEdit)
+        {
+            BeginEdit();
+            e.Handled = true;
+            return;
+        }
+
+        _isPointerDown = true;
+        _isDragging = false;
         _dragStart = e.GetPosition(Parent as UIElement);
-        _dragOrigin = new Point(Canvas.GetLeft(this), Canvas.GetTop(this));
+        var left = Canvas.GetLeft(this);
+        var top = Canvas.GetTop(this);
+        _dragOrigin = new Point(double.IsNaN(left) ? 0 : left, double.IsNaN(top) ? 0 : top);
         CaptureMouse();
         e.Handled = true;
     }
 
-    private void OnMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
-    {
-        if (e.ClickCount == 2)
-        {
-            BeginEdit();
-            e.Handled = true;
-        }
-    }
-
     private void OnMouseMove(object sender, MouseEventArgs e)
     {
-        if (!_isDragging)
+        if (!_isPointerDown || IsEditing)
         {
             return;
         }
 
         var current = e.GetPosition(Parent as UIElement);
+        if (!_isDragging)
+        {
+            var delta = current - _dragStart;
+            if (Math.Abs(delta.X) < DragThresholdX && Math.Abs(delta.Y) < DragThresholdY)
+            {
+                return;
+            }
+
+            _isDragging = true;
+        }
+
         var offset = current - _dragStart;
         Canvas.SetLeft(this, _dragOrigin.X + offset.X);
         Canvas.SetTop(this, _dragOrigin.Y + offset.Y);
@@ -168,17 +197,31 @@ public partial class TextAnnotationControl : UserControl
 
     private void OnMouseUp(object sender, MouseButtonEventArgs e)
     {
-        if (!_isDragging)
+        if (!_isPointerDown)
         {
             return;
         }
 
-        _isDragging = false;
-        ReleaseMouseCapture();
-        DragCompleted?.Invoke(this, EventArgs.Empty);
-        e.Handled = true;
+        if (IsMouseCaptured)
+        {
+            ReleaseMouseCapture();
+        }
+
+        var wasDragging = _isDragging;
+        if (wasDragging)
+        {
+            DragCompleted?.Invoke(this, EventArgs.Empty);
+        }
+
+        ResetDragState();
+        e.Handled = wasDragging;
     }
 
+    private void ResetDragState()
+    {
+        _isDragging = false;
+        _isPointerDown = false;
+    }
 
     private void OnResizeDelta(object sender, DragDeltaEventArgs e)
     {

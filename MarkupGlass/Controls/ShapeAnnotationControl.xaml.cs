@@ -16,7 +16,10 @@ namespace MarkupGlass.Controls;
 
 public partial class ShapeAnnotationControl : UserControl
 {
+    private static readonly double DragThresholdX = SystemParameters.MinimumHorizontalDragDistance;
+    private static readonly double DragThresholdY = SystemParameters.MinimumVerticalDragDistance;
     private bool _isDragging;
+    private bool _isPointerDown;
     private Point _dragStart;
     private Point _dragOrigin;
     private Point _startAbsolute;
@@ -32,6 +35,7 @@ public partial class ShapeAnnotationControl : UserControl
         HitTarget.MouseLeftButtonDown += OnMouseDown;
         HitTarget.MouseMove += OnMouseMove;
         HitTarget.MouseLeftButtonUp += OnMouseUp;
+        HitTarget.LostMouseCapture += (_, _) => ResetDragState();
         ResizeThumb.DragDelta += OnResizeDelta;
         ResizeThumb.DragCompleted += (_, _) => ResizeCompleted?.Invoke(this, EventArgs.Empty);
     }
@@ -150,7 +154,8 @@ public partial class ShapeAnnotationControl : UserControl
         }
 
         Selected?.Invoke(this, EventArgs.Empty);
-        _isDragging = true;
+        _isPointerDown = true;
+        _isDragging = false;
         _dragStart = e.GetPosition(Parent as UIElement);
         _dragOrigin = new Point(Canvas.GetLeft(this), Canvas.GetTop(this));
         CaptureMouse();
@@ -159,12 +164,22 @@ public partial class ShapeAnnotationControl : UserControl
 
     private void OnMouseMove(object sender, MouseEventArgs e)
     {
-        if (!_isDragging)
+        if (!_isPointerDown)
         {
             return;
         }
 
         var current = e.GetPosition(Parent as UIElement);
+        if (!_isDragging)
+        {
+            var initialDelta = current - _dragStart;
+            if (Math.Abs(initialDelta.X) < DragThresholdX && Math.Abs(initialDelta.Y) < DragThresholdY)
+            {
+                return;
+            }
+
+            _isDragging = true;
+        }
         var offset = current - _dragStart;
         var delta = new Vector(offset.X, offset.Y);
 
@@ -176,15 +191,30 @@ public partial class ShapeAnnotationControl : UserControl
 
     private void OnMouseUp(object sender, MouseButtonEventArgs e)
     {
-        if (!_isDragging)
+        if (!_isPointerDown)
         {
             return;
         }
 
+        if (IsMouseCaptured)
+        {
+            ReleaseMouseCapture();
+        }
+
+        var wasDragging = _isDragging;
+        if (wasDragging)
+        {
+            DragCompleted?.Invoke(this, EventArgs.Empty);
+        }
+
+        ResetDragState();
+        e.Handled = wasDragging;
+    }
+
+    private void ResetDragState()
+    {
         _isDragging = false;
-        ReleaseMouseCapture();
-        DragCompleted?.Invoke(this, EventArgs.Empty);
-        e.Handled = true;
+        _isPointerDown = false;
     }
 
     private void OnResizeDelta(object sender, DragDeltaEventArgs e)
