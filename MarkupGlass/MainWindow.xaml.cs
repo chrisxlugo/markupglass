@@ -57,6 +57,7 @@ public partial class MainWindow : Window
     private ShapeAnnotationControl? _selectedShape;
     private string? _screenshotFolder;
     private HwndSource? _source;
+    private ToolbarWindow? _toolbarWindow;
     private Point _snipStart;
     private bool _isPlacingShape;
     private Point _shapeStart;
@@ -69,6 +70,7 @@ public partial class MainWindow : Window
     private bool _moveTextMode;
     private bool _suppressTextCreateOnClick;
     private bool _moveTextChordHeld;
+    private bool _clickThroughEnabled;
 
     public MainWindow()
     {
@@ -82,6 +84,7 @@ public partial class MainWindow : Window
         _saveTimer.Tick += (_, _) => SaveSession();
         Loaded += OnLoaded;
         Closing += (_, _) => SaveSession();
+        StateChanged += OnWindowStateChanged;
 
         InkSurface.StrokeCollected += (_, _) => ScheduleSave();
         InkSurface.Strokes.StrokesChanged += (_, _) => ScheduleSave();
@@ -101,9 +104,28 @@ public partial class MainWindow : Window
         SetTool(ToolMode.Pen);
     }
 
+    private void OnWindowStateChanged(object? sender, EventArgs e)
+    {
+        if (WindowState == WindowState.Minimized)
+        {
+            SetTool(ToolMode.Cursor);
+            if (_toolbarWindow != null)
+            {
+                _toolbarWindow.Visibility = Visibility.Hidden;
+            }
+            return;
+        }
+
+        if (_toolbarWindow != null && Visibility == Visibility.Visible)
+        {
+            _toolbarWindow.Visibility = Visibility.Visible;
+        }
+    }
+
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         SetFullScreen();
+        InitializeToolbarWindow();
         PositionToolbarOnPrimary();
         LoadSession();
         _undoManager.Push(BuildSession());
@@ -127,6 +149,11 @@ public partial class MainWindow : Window
         {
             _source.RemoveHook(WndProc);
             _source = null;
+        }
+        if (_toolbarWindow != null)
+        {
+            _toolbarWindow.Close();
+            _toolbarWindow = null;
         }
         _hotkeyManager.Dispose();
         base.OnClosed(e);
@@ -425,6 +452,49 @@ public partial class MainWindow : Window
         Height = SystemParameters.VirtualScreenHeight;
     }
 
+    private void InitializeToolbarWindow()
+    {
+        if (_toolbarWindow != null)
+        {
+            return;
+        }
+
+        _toolbarWindow = new ToolbarWindow
+        {
+            Owner = this
+        };
+        _toolbarWindow.Show();
+
+        if (Content is Grid root)
+        {
+            var layers = new UIElement[]
+            {
+                UiLayer,
+                ShapePaletteLayer,
+                InkPaletteLayer,
+                SettingsLayer,
+                ColorPaletteLayer,
+                FontPaletteLayer
+            };
+
+            foreach (var layer in layers)
+            {
+                root.Children.Remove(layer);
+            }
+
+            _toolbarWindow.AttachLayers(layers);
+            _toolbarWindow.SetInteractiveElements(new[]
+            {
+                Toolbar,
+                ShapePalette,
+                InkPalette,
+                ColorPalette,
+                FontPalette,
+                SettingsPanel
+            });
+        }
+    }
+
     private void PositionToolbarOnPrimary()
     {
         var primary = Forms.Screen.PrimaryScreen?.Bounds
@@ -622,8 +692,8 @@ public partial class MainWindow : Window
         InkSurface.IsEnabled = interactive && mode != ToolMode.Text && mode != ToolMode.Shapes;
         ShapeLayer.IsHitTestVisible = mode == ToolMode.Shapes;
         TextLayer.IsHitTestVisible = mode == ToolMode.Text;
-        UiLayer.IsHitTestVisible = interactive;
-        Toolbar.IsHitTestVisible = interactive;
+        UiLayer.IsHitTestVisible = true;
+        Toolbar.IsHitTestVisible = true;
         Toolbar.Opacity = 1.0;
         SetClickThrough(mode == ToolMode.Cursor);
 
@@ -726,15 +796,6 @@ public partial class MainWindow : Window
 
         if (_toolMode == ToolMode.Shapes && e.LeftButton == MouseButtonState.Pressed)
         {
-            if (IsWithinToolbar(e.OriginalSource as DependencyObject, e.GetPosition(UiLayer)) ||
-                IsWithinShapePalette(e.OriginalSource as DependencyObject, e.GetPosition(UiLayer)) ||
-                IsWithinColorPalette(e.OriginalSource as DependencyObject, e.GetPosition(UiLayer)) ||
-                IsWithinFontPalette(e.OriginalSource as DependencyObject, e.GetPosition(UiLayer)) ||
-                IsWithinInkPalette(e.OriginalSource as DependencyObject, e.GetPosition(UiLayer)))
-            {
-                return;
-            }
-
             DeselectText();
             var existingShape = FindAncestor<ShapeAnnotationControl>(e.OriginalSource as DependencyObject);
             if (existingShape != null)
@@ -759,21 +820,7 @@ public partial class MainWindow : Window
 
         if (_toolMode != ToolMode.Text || _moveTextMode || e.LeftButton != MouseButtonState.Pressed)
         {
-            if (!IsWithinToolbar(e.OriginalSource as DependencyObject, e.GetPosition(UiLayer)) &&
-                FindAncestor<TextAnnotationControl>(e.OriginalSource as DependencyObject) == null)
-            {
-                DeselectText();
-            }
-            return;
-        }
-
-        if (IsWithinToolbar(e.OriginalSource as DependencyObject, e.GetPosition(UiLayer)) ||
-            IsWithinColorPalette(e.OriginalSource as DependencyObject, e.GetPosition(UiLayer)) ||
-            IsWithinFontPalette(e.OriginalSource as DependencyObject, e.GetPosition(UiLayer)) ||
-            IsWithinShapePalette(e.OriginalSource as DependencyObject, e.GetPosition(UiLayer)) ||
-            IsWithinInkPalette(e.OriginalSource as DependencyObject, e.GetPosition(UiLayer)))
-        {
-            if (_selectedText != null && _selectedText.IsEditing)
+            if (FindAncestor<TextAnnotationControl>(e.OriginalSource as DependencyObject) == null)
             {
                 DeselectText();
             }
@@ -1768,7 +1815,12 @@ public partial class MainWindow : Window
 
     private void ToggleVisibility()
     {
-        Visibility = Visibility == Visibility.Visible ? Visibility.Hidden : Visibility.Visible;
+        var target = Visibility == Visibility.Visible ? Visibility.Hidden : Visibility.Visible;
+        Visibility = target;
+        if (_toolbarWindow != null)
+        {
+            _toolbarWindow.Visibility = target;
+        }
     }
 
     private void ToggleToolbar()
@@ -1784,6 +1836,8 @@ public partial class MainWindow : Window
 
         if (_toolbarCollapsed)
         {
+            CloseAllPalettes();
+            SetSettingsVisible(false);
             var scaleAnim = new DoubleAnimation(0, duration) { EasingFunction = easing };
             var opacityAnim = new DoubleAnimation(0, duration) { EasingFunction = easing };
             opacityAnim.Completed += (_, _) => content.Visibility = Visibility.Collapsed;
@@ -1797,6 +1851,14 @@ public partial class MainWindow : Window
         var showOpacity = new DoubleAnimation(1, duration) { EasingFunction = easing };
         scale.BeginAnimation(ScaleTransform.ScaleYProperty, showScale);
         content.BeginAnimation(OpacityProperty, showOpacity);
+    }
+
+    private void CloseAllPalettes()
+    {
+        ShapePalette.Visibility = Visibility.Collapsed;
+        InkPalette.Visibility = Visibility.Collapsed;
+        ColorPalette.Visibility = Visibility.Collapsed;
+        FontPalette.Visibility = Visibility.Collapsed;
     }
 
     private void StartSnip()
@@ -1914,7 +1976,7 @@ public partial class MainWindow : Window
         if (msg == Win32.WM_NCHITTEST)
         {
             handled = true;
-            return new IntPtr(Win32.HTCLIENT);
+            return _clickThroughEnabled ? new IntPtr(Win32.HTTRANSPARENT) : new IntPtr(Win32.HTCLIENT);
         }
 
         return IntPtr.Zero;
@@ -1922,6 +1984,7 @@ public partial class MainWindow : Window
 
     private void SetClickThrough(bool enabled)
     {
+        _clickThroughEnabled = enabled;
         var handle = new WindowInteropHelper(this).Handle;
         var styles = Win32.GetWindowLongPtr(handle, Win32.GWL_EXSTYLE).ToInt64();
         var hasFlag = (styles & Win32.WS_EX_TRANSPARENT) != 0;

@@ -1,0 +1,16 @@
+<Window x:Class="MarkupGlass.ToolbarWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="MarkupGlass Toolbar"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Topmost="True"
+        ShowInTaskbar="False">
+  <Grid Background="Transparent">
+    <Canvas x:Name="ToolbarRoot"
+            Background="Transparent"
+            IsHitTestVisible="True" />
+  </Grid>
+</Window>
