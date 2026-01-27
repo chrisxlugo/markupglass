@@ -366,6 +366,7 @@ public partial class MainWindow : Window
         if (visible)
         {
             RefreshHotkeyDisplay();
+            Dispatcher.BeginInvoke(new Action(PositionSettingsPanel), DispatcherPriority.Loaded);
         }
     }
 
@@ -421,11 +422,60 @@ public partial class MainWindow : Window
 
     private void PositionToolbarOnPrimary()
     {
-        var primary = Forms.Screen.PrimaryScreen.Bounds;
+        var primary = Forms.Screen.PrimaryScreen?.Bounds
+            ?? Forms.Screen.AllScreens.FirstOrDefault()?.Bounds
+            ?? new Drawing.Rectangle(0, 0, (int)SystemParameters.PrimaryScreenWidth,
+                (int)SystemParameters.PrimaryScreenHeight);
         var left = primary.Left - SystemParameters.VirtualScreenLeft + 20;
         var top = primary.Top - SystemParameters.VirtualScreenTop + 20;
         Canvas.SetLeft(Toolbar, left);
         Canvas.SetTop(Toolbar, top);
+    }
+
+    private void PositionSettingsPanel()
+    {
+        var panelWidth = SettingsPanel.Width;
+        var panelHeight = SettingsPanel.Height;
+        if (panelWidth <= 0 || panelHeight <= 0)
+        {
+            SettingsPanel.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
+            if (panelWidth <= 0)
+            {
+                panelWidth = SettingsPanel.DesiredSize.Width;
+            }
+            if (panelHeight <= 0)
+            {
+                panelHeight = SettingsPanel.DesiredSize.Height;
+            }
+        }
+
+        var toolbarLeft = Canvas.GetLeft(Toolbar);
+        var toolbarTop = Canvas.GetTop(Toolbar);
+        if (double.IsNaN(toolbarLeft))
+        {
+            toolbarLeft = 20;
+        }
+        if (double.IsNaN(toolbarTop))
+        {
+            toolbarTop = 20;
+        }
+
+        const double padding = 20;
+        const double gap = 16;
+        var left = toolbarLeft + Toolbar.ActualWidth + gap;
+        var top = toolbarTop;
+
+        var maxLeft = Math.Max(0, ActualWidth - panelWidth - padding);
+        var maxTop = Math.Max(0, ActualHeight - panelHeight - padding);
+        if (left > maxLeft)
+        {
+            left = toolbarLeft - panelWidth - gap;
+        }
+
+        left = Math.Clamp(left, padding, maxLeft);
+        top = Math.Clamp(top, padding, maxTop);
+        Canvas.SetLeft(SettingsPanel, left);
+        Canvas.SetTop(SettingsPanel, top);
     }
 
     private void HookToolbarDrag()
@@ -603,6 +653,17 @@ public partial class MainWindow : Window
 
     private void OnWindowPreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
+        if (_toolMode == ToolMode.Eraser && e.LeftButton == MouseButtonState.Pressed)
+        {
+            var removed = TryEraseText(e.GetPosition(TextLayer)) || TryEraseShape(e.GetPosition(ShapeLayer));
+            if (removed)
+            {
+                ScheduleSave();
+                e.Handled = true;
+            }
+            return;
+        }
+
         if (_isSnipping && e.LeftButton == MouseButtonState.Pressed)
         {
             _snipStart = e.GetPosition(this);
@@ -663,10 +724,20 @@ public partial class MainWindow : Window
             IsWithinShapePalette(e.OriginalSource as DependencyObject, e.GetPosition(UiLayer)) ||
             IsWithinInkPalette(e.OriginalSource as DependencyObject, e.GetPosition(UiLayer)))
         {
+            if (_selectedText != null && _selectedText.IsEditing)
+            {
+                DeselectText();
+            }
             return;
         }
 
         var existingText = FindAncestor<TextAnnotationControl>(e.OriginalSource as DependencyObject);
+        if (_selectedText != null && _selectedText.IsEditing && existingText == null)
+        {
+            DeselectText();
+            e.Handled = true;
+            return;
+        }
         if (existingText != null)
         {
             SelectText(existingText);
@@ -691,6 +762,17 @@ public partial class MainWindow : Window
 
     private void OnWindowPreviewMouseMove(object sender, MouseEventArgs e)
     {
+        if (_toolMode == ToolMode.Eraser && e.LeftButton == MouseButtonState.Pressed)
+        {
+            var removed = TryEraseText(e.GetPosition(TextLayer)) || TryEraseShape(e.GetPosition(ShapeLayer));
+            if (removed)
+            {
+                ScheduleSave();
+                e.Handled = true;
+                return;
+            }
+        }
+
         if (_isPlacingShape && IsMouseCaptured && e.LeftButton == MouseButtonState.Pressed)
         {
             var shapeCurrent = e.GetPosition(ShapeLayer);
@@ -1391,6 +1473,89 @@ public partial class MainWindow : Window
         _selectedText.SetSelected(false);
         _selectedText.EndEdit();
         _selectedText = null;
+    }
+
+    private bool TryEraseText(Point position)
+    {
+        for (var i = TextLayer.Children.Count - 1; i >= 0; i--)
+        {
+            if (TextLayer.Children[i] is not TextAnnotationControl text)
+            {
+                continue;
+            }
+
+            if (!IsPointWithinControl(text, position))
+            {
+                continue;
+            }
+
+            if (ReferenceEquals(_selectedText, text))
+            {
+                DeselectText();
+            }
+
+            TextLayer.Children.RemoveAt(i);
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryEraseShape(Point position)
+    {
+        for (var i = ShapeLayer.Children.Count - 1; i >= 0; i--)
+        {
+            if (ShapeLayer.Children[i] is not ShapeAnnotationControl shape)
+            {
+                continue;
+            }
+
+            if (!IsPointWithinControl(shape, position))
+            {
+                continue;
+            }
+
+            if (ReferenceEquals(_selectedShape, shape))
+            {
+                DeselectShape();
+            }
+
+            ShapeLayer.Children.RemoveAt(i);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool IsPointWithinControl(UIElement control, Point positionInLayer)
+    {
+        var left = Canvas.GetLeft(control);
+        if (double.IsNaN(left))
+        {
+            left = 0;
+        }
+
+        var top = Canvas.GetTop(control);
+        if (double.IsNaN(top))
+        {
+            top = 0;
+        }
+
+        var width = 0.0;
+        var height = 0.0;
+        if (control is FrameworkElement element)
+        {
+            width = element.ActualWidth > 0 ? element.ActualWidth : element.Width;
+            height = element.ActualHeight > 0 ? element.ActualHeight : element.Height;
+        }
+
+        if (width <= 0 || height <= 0)
+        {
+            return false;
+        }
+
+        var bounds = new Rect(left, top, width, height);
+        return bounds.Contains(positionInLayer);
     }
 
     private void UpdateSelectedTextStyle()

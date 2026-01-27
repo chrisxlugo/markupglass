@@ -32,6 +32,7 @@ public partial class TextAnnotationControl : UserControl
     public TextAnnotationControl()
     {
         InitializeComponent();
+        SetEditorInteraction(false);
         Editor.PreviewMouseLeftButtonDown += (_, _) => Selected?.Invoke(this, EventArgs.Empty);
         RootBorder.MouseLeftButtonDown += OnMouseDown;
         RootBorder.MouseMove += OnMouseMove;
@@ -55,6 +56,8 @@ public partial class TextAnnotationControl : UserControl
         set => ApplyBackground(value);
     }
 
+    public bool IsEditing => !Editor.IsReadOnly;
+
     public Brush TextBrush
     {
         get => Editor.Foreground;
@@ -74,19 +77,19 @@ public partial class TextAnnotationControl : UserControl
 
     public void BeginEdit()
     {
-        Editor.IsReadOnly = false;
+        SetEditorInteraction(true);
         Editor.Focus();
         Editor.CaretIndex = Editor.Text.Length;
     }
 
     public void EndEdit()
     {
-        if (Editor.IsReadOnly)
+        if (!IsEditing)
         {
             return;
         }
 
-        Editor.IsReadOnly = true;
+        SetEditorInteraction(false);
         EditCompleted?.Invoke(this, EventArgs.Empty);
     }
 
@@ -95,6 +98,12 @@ public partial class TextAnnotationControl : UserControl
         _isSelected = selected;
         ResizeThumb.Visibility = selected ? Visibility.Visible : Visibility.Collapsed;
         ApplyBorderBrush();
+    }
+
+    private void SetEditorInteraction(bool enabled)
+    {
+        Editor.IsReadOnly = !enabled;
+        Editor.IsHitTestVisible = enabled;
     }
 
     private void ApplyBackground(bool enabled)
@@ -124,7 +133,7 @@ public partial class TextAnnotationControl : UserControl
     {
         if (!Editor.IsReadOnly)
         {
-            return;
+            EndEdit();
         }
 
         Selected?.Invoke(this, EventArgs.Empty);
@@ -182,6 +191,15 @@ public partial class TextAnnotationControl : UserControl
     private void OnEditorKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key == Key.Escape)
+        {
+            EndEdit();
+            e.Handled = true;
+            return;
+        }
+
+        if (e.Key == Key.Enter &&
+            (System.Windows.Input.Keyboard.Modifiers & System.Windows.Input.ModifierKeys.Control) ==
+            System.Windows.Input.ModifierKeys.Control)
         {
             EndEdit();
             e.Handled = true;
