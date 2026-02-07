@@ -33,6 +33,11 @@ public partial class ToolbarWindow : Window
         _interactiveElements.AddRange(elements);
     }
 
+    public void SetLayerVisibility(UIElement layer, bool visible)
+    {
+        layer.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+    }
+
     protected override void OnSourceInitialized(EventArgs e)
     {
         base.OnSourceInitialized(e);

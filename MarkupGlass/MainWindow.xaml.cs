@@ -18,12 +18,14 @@ using MessageBox = System.Windows.MessageBox;
 using ColorConverter = System.Windows.Media.ColorConverter;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Ink;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
+using System.Diagnostics;
 using Drawing = System.Drawing;
 using DrawingImaging = System.Drawing.Imaging;
 using Forms = System.Windows.Forms;
@@ -42,27 +44,26 @@ public partial class MainWindow : Window
     private readonly HotkeyManager _hotkeyManager = new();
     private readonly DispatcherTimer _saveTimer;
     private readonly List<ColorOption> _colors = new();
+    private readonly List<ColorOption> _toolbarColors = new();
     private readonly Brush _activeToolBrush = SystemColors.HighlightBrush;
     private Color _selectedColor = Colors.White;
     private double _selectedFontSize = 16;
     private ToolMode _toolMode = ToolMode.Pen;
     private ToolMode _lastNonCursorTool = ToolMode.Pen;
     private bool _toolbarCollapsed;
-    private bool _isSnipping;
     private bool _isRestoring;
     private Point _toolbarDragStart;
     private Point _toolbarOrigin;
     private bool _toolbarDragging;
     private TextAnnotationControl? _selectedText;
     private ShapeAnnotationControl? _selectedShape;
-    private string? _screenshotFolder;
     private HwndSource? _source;
     private ToolbarWindow? _toolbarWindow;
-    private Point _snipStart;
     private bool _isPlacingShape;
     private Point _shapeStart;
     private ShapeAnnotationControl? _activeShape;
     private ShapeType _shapeType = ShapeType.Rectangle;
+    private AppSettings _appSettings = new();
     private HotkeySettings _hotkeySettings = new();
     private bool _settingsDragging;
     private Point _settingsDragStart;
@@ -71,11 +72,27 @@ public partial class MainWindow : Window
     private bool _suppressTextCreateOnClick;
     private bool _moveTextChordHeld;
     private bool _clickThroughEnabled;
+    private double _whiteboardWidth;
+    private const double WhiteboardGap = 12;
+    private readonly RectangleGeometry _whiteboardClip = new();
+    private bool _whiteboardClipApplied;
+    private bool _deferWhiteboardClip;
+    private System.Windows.Size _toolbarDragSize;
+    private System.Windows.Media.Effects.Effect? _whiteboardShadowEffect;
+    private bool _whiteboardGhosting;
+    private double _whiteboardGhostLeft;
+    private double _whiteboardGhostTop;
+    private double _whiteboardLeft;
+    private double _whiteboardTop;
+    private bool _whiteboardPositionInitialized;
+    private readonly Stopwatch _toolbarDragClock = Stopwatch.StartNew();
+    private long _lastToolbarDragTick;
 
     public MainWindow()
     {
         InitializeComponent();
-        _hotkeySettings = _settingsStore.Load();
+        _appSettings = _settingsStore.Load();
+        _hotkeySettings = _appSettings.Hotkeys;
         _undoManager = new UndoManager(_sessionStore);
         _saveTimer = new DispatcherTimer
         {
@@ -96,6 +113,7 @@ public partial class MainWindow : Window
 
         HookToolbarDrag();
         HookToolbarButtons();
+        Toolbar.SizeChanged += (_, _) => PositionWhiteboard();
         SetupPickers();
         UpdateShapeType(_shapeType);
         UpdateInkToolIcon(_toolMode);
@@ -109,16 +127,30 @@ public partial class MainWindow : Window
         if (WindowState == WindowState.Minimized)
         {
             SetTool(ToolMode.Cursor);
+            if (WhiteboardPanel.Visibility == Visibility.Visible)
+            {
+                ToggleWhiteboard();
+            }
+            WhiteboardLayer.Visibility = Visibility.Collapsed;
+            Hide();
             if (_toolbarWindow != null)
             {
                 _toolbarWindow.Visibility = Visibility.Hidden;
+                _toolbarWindow.SetLayerVisibility(WhiteboardLayer, false);
             }
             return;
         }
 
+        if (Visibility != Visibility.Visible)
+        {
+            Show();
+        }
+
+        WhiteboardLayer.Visibility = Visibility.Visible;
         if (_toolbarWindow != null && Visibility == Visibility.Visible)
         {
             _toolbarWindow.Visibility = Visibility.Visible;
+            _toolbarWindow.SetLayerVisibility(WhiteboardLayer, WhiteboardPanel.Visibility == Visibility.Visible);
         }
     }
 
@@ -205,7 +237,7 @@ public partial class MainWindow : Window
         try
         {
             ApplyHotkeys();
-            _settingsStore.Save(_hotkeySettings);
+            SaveSettings();
         }
         catch (Exception ex)
         {
@@ -397,6 +429,7 @@ public partial class MainWindow : Window
         SettingsPanel.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         if (visible)
         {
+            SetWhiteboardVisible(false);
             RefreshHotkeyDisplay();
             Dispatcher.BeginInvoke(new Action(PositionSettingsPanel), DispatcherPriority.Loaded);
         }
@@ -474,7 +507,7 @@ public partial class MainWindow : Window
                 InkPaletteLayer,
                 SettingsLayer,
                 ColorPaletteLayer,
-                FontPaletteLayer
+                FontPaletteLayer,
             };
 
             foreach (var layer in layers)
@@ -483,14 +516,15 @@ public partial class MainWindow : Window
             }
 
             _toolbarWindow.AttachLayers(layers);
-            _toolbarWindow.SetInteractiveElements(new[]
+            _toolbarWindow.SetInteractiveElements(new FrameworkElement[]
             {
                 Toolbar,
                 ShapePalette,
                 InkPalette,
                 ColorPalette,
                 FontPalette,
-                SettingsPanel
+                SettingsPanel,
+                WhiteboardResizeThumb
             });
         }
     }
@@ -505,6 +539,7 @@ public partial class MainWindow : Window
         var top = primary.Top - SystemParameters.VirtualScreenTop + 20;
         Canvas.SetLeft(Toolbar, left);
         Canvas.SetTop(Toolbar, top);
+        PositionWhiteboard();
     }
 
     private void PositionSettingsPanel()
@@ -560,6 +595,17 @@ public partial class MainWindow : Window
             _toolbarDragging = true;
             _toolbarDragStart = e.GetPosition(UiLayer);
             _toolbarOrigin = new Point(Canvas.GetLeft(Toolbar), Canvas.GetTop(Toolbar));
+            _toolbarDragSize = GetToolbarSize();
+            _deferWhiteboardClip = WhiteboardPanel.Visibility == Visibility.Visible;
+            if (_deferWhiteboardClip)
+            {
+                _whiteboardShadowEffect ??= WhiteboardPanel.Effect;
+                WhiteboardPanel.Effect = null;
+                WhiteboardPanel.CacheMode = new BitmapCache(1.0);
+                BeginWhiteboardGhost();
+            }
+            Toolbar.CacheMode = new BitmapCache(1.0);
+            _lastToolbarDragTick = _toolbarDragClock.ElapsedMilliseconds;
             Toolbar.CaptureMouse();
         };
 
@@ -570,11 +616,26 @@ public partial class MainWindow : Window
                 return;
             }
 
+            var now = _toolbarDragClock.ElapsedMilliseconds;
+            if (now - _lastToolbarDragTick < 16)
+            {
+                return;
+            }
+            _lastToolbarDragTick = now;
+
             var current = e.GetPosition(UiLayer);
             var offset = current - _toolbarDragStart;
             Canvas.SetLeft(Toolbar, _toolbarOrigin.X + offset.X);
             Canvas.SetTop(Toolbar, _toolbarOrigin.Y + offset.Y);
             PositionPalettes();
+            if (_whiteboardGhosting)
+            {
+                UpdateWhiteboardGhost();
+            }
+            else if (WhiteboardPanel.Visibility != Visibility.Visible)
+            {
+                PositionWhiteboard(updateClip: !_deferWhiteboardClip);
+            }
         };
 
         Toolbar.MouseLeftButtonUp += (_, _) =>
@@ -585,8 +646,20 @@ public partial class MainWindow : Window
             }
 
             _toolbarDragging = false;
+            _deferWhiteboardClip = false;
             Toolbar.ReleaseMouseCapture();
             PositionPalettes();
+            if (_whiteboardGhosting)
+            {
+                CommitWhiteboardGhost();
+            }
+            PositionWhiteboard();
+            if (_whiteboardShadowEffect != null)
+            {
+                WhiteboardPanel.Effect = _whiteboardShadowEffect;
+            }
+            WhiteboardPanel.CacheMode = null;
+            Toolbar.CacheMode = null;
         };
     }
 
@@ -603,15 +676,30 @@ public partial class MainWindow : Window
         ShapeButton.PreviewMouseLeftButtonDown += OnShapeButtonPreviewMouseDown;
         ColorButton.PreviewMouseLeftButtonDown += OnColorButtonPreviewMouseDown;
         FontButton.PreviewMouseLeftButtonDown += OnFontButtonPreviewMouseDown;
+        WhiteboardButton.Click += (_, _) => ToggleWhiteboard();
         SettingsButton.Click += (_, _) => ToggleSettings();
         CloseSettingsButton.Click += (_, _) => SetSettingsVisible(false);
         CloseSettingsHeaderButton.Click += (_, _) => SetSettingsVisible(false);
         ApplyHotkeysButton.Click += (_, _) => ApplyHotkeysAndSave();
-        CameraButton.Click += (_, _) => StartSnip();
         UndoButton.Click += (_, _) => Undo();
         ClearButton.Click += (_, _) => ClearAll();
         TextBackgroundToggle.Checked += (_, _) => UpdateSelectedTextStyle();
         TextBackgroundToggle.Unchecked += (_, _) => UpdateSelectedTextStyle();
+
+        WhiteboardResizeThumb.DragStarted += (_, _) =>
+        {
+            if (_whiteboardWidth <= 0)
+            {
+                _whiteboardWidth = GetToolbarSize().Width;
+            }
+        };
+        WhiteboardResizeThumb.DragDelta += (_, e) =>
+        {
+            var minWidth = GetToolbarSize().Width;
+            _whiteboardWidth = Math.Max(minWidth, _whiteboardWidth + e.HorizontalChange);
+            PositionWhiteboard();
+            e.Handled = true;
+        };
 
         LineShapeButton.PreviewMouseLeftButtonDown += (s, e) => HandleShapePaletteClick(ShapeType.Line, e);
         ArrowShapeButton.PreviewMouseLeftButtonDown += (s, e) => HandleShapePaletteClick(ShapeType.Arrow, e);
@@ -624,17 +712,8 @@ public partial class MainWindow : Window
 
     private void SetupPickers()
     {
-        _colors.Add(new ColorOption("White", Colors.White));
-        _colors.Add(new ColorOption("Red", Colors.Red));
-        _colors.Add(new ColorOption("Yellow", Colors.Yellow));
-        _colors.Add(new ColorOption("Aqua", Colors.Aqua));
-        _colors.Add(new ColorOption("Lime", Colors.Lime));
-        _selectedColor = _colors[0].Color;
-        UpdateColorSwatch();
-        foreach (var option in _colors)
-        {
-            ColorPalettePanel.Children.Add(CreateColorPaletteButton(option));
-        }
+        LoadColorSettings();
+        PopulateColorPickers();
 
         var fontSizes = new List<double> { 12, 16, 20, 24, 32 };
         _selectedFontSize = fontSizes[1];
@@ -645,6 +724,264 @@ public partial class MainWindow : Window
         }
 
         ThicknessSlider.ValueChanged += (_, _) => UpdateDrawingAttributes();
+    }
+
+    private void LoadColorSettings()
+    {
+        _colors.Clear();
+        _toolbarColors.Clear();
+
+        var defaults = new[]
+        {
+            Colors.White,
+            Colors.Red,
+            Colors.Yellow,
+            Colors.Aqua,
+            Colors.Lime
+        };
+
+        var library = _appSettings.ColorLibrary;
+        if (library == null || library.Count == 0)
+        {
+            foreach (var color in defaults)
+            {
+                _colors.Add(new ColorOption(color.ToString(), color));
+            }
+        }
+        else
+        {
+            foreach (var value in library)
+            {
+                if (TryParseColor(value, out var color))
+                {
+                    _colors.Add(new ColorOption(color.ToString(), color));
+                }
+            }
+        }
+
+        if (_colors.Count == 0)
+        {
+            foreach (var color in defaults)
+            {
+                _colors.Add(new ColorOption(color.ToString(), color));
+            }
+        }
+
+        var toolbar = _appSettings.ToolbarColors;
+        if (toolbar == null || toolbar.Count == 0)
+        {
+            foreach (var color in defaults)
+            {
+                _toolbarColors.Add(new ColorOption(color.ToString(), color));
+            }
+        }
+        else
+        {
+            foreach (var value in toolbar.Take(5))
+            {
+                if (TryParseColor(value, out var color))
+                {
+                    _toolbarColors.Add(new ColorOption(color.ToString(), color));
+                }
+            }
+        }
+
+        while (_toolbarColors.Count < 5)
+        {
+            var color = defaults[_toolbarColors.Count % defaults.Length];
+            _toolbarColors.Add(new ColorOption(color.ToString(), color));
+        }
+
+        EnsureToolbarColorsInLibrary();
+
+        _selectedColor = _toolbarColors[0].Color;
+        UpdateColorSwatch();
+        BuildColorPaletteButtons();
+        RefreshColorLibraryPanel();
+    }
+
+    private void PopulateColorPickers()
+    {
+        var combos = new[]
+        {
+            ToolbarColor1Box,
+            ToolbarColor2Box,
+            ToolbarColor3Box,
+            ToolbarColor4Box,
+            ToolbarColor5Box
+        };
+
+        for (var i = 0; i < combos.Length; i++)
+        {
+            combos[i].ItemsSource = _colors;
+            combos[i].SelectedItem = _toolbarColors[i];
+            combos[i].Tag = i;
+            combos[i].SelectionChanged += OnToolbarColorSelectionChanged;
+        }
+
+        AddColorButton.Click += (_, _) => AddColorFromInputs();
+    }
+
+    private void EnsureToolbarColorsInLibrary()
+    {
+        for (var i = 0; i < _toolbarColors.Count; i++)
+        {
+            var option = _toolbarColors[i];
+            var existing = _colors.FirstOrDefault(entry => entry.Color == option.Color);
+            if (existing != null)
+            {
+                _toolbarColors[i] = existing;
+                continue;
+            }
+
+            _colors.Add(option);
+        }
+    }
+
+    private void BuildColorPaletteButtons()
+    {
+        ColorPalettePanel.Children.Clear();
+        foreach (var option in _toolbarColors)
+        {
+            ColorPalettePanel.Children.Add(CreateColorPaletteButton(option));
+        }
+    }
+
+    private void RefreshColorLibraryPanel()
+    {
+        ColorLibraryPanel.Children.Clear();
+        foreach (var option in _colors)
+        {
+            ColorLibraryPanel.Children.Add(CreateLibraryColorButton(option));
+        }
+    }
+
+    private void AddColorFromInputs()
+    {
+        if (!TryParseRgbBox(ColorRedBox.Text, out var r) ||
+            !TryParseRgbBox(ColorGreenBox.Text, out var g) ||
+            !TryParseRgbBox(ColorBlueBox.Text, out var b))
+        {
+            MessageBox.Show("Enter RGB values from 0 to 255.", "Invalid Color",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var color = Color.FromRgb((byte)r, (byte)g, (byte)b);
+        if (_colors.Any(option => option.Color == color))
+        {
+            return;
+        }
+
+        var option = new ColorOption(color.ToString(), color);
+        _colors.Add(option);
+        RefreshColorLibraryPanel();
+        RefreshToolbarColorPickers();
+        SaveSettings();
+    }
+
+    private void RefreshToolbarColorPickers()
+    {
+        var combos = new[]
+        {
+            ToolbarColor1Box,
+            ToolbarColor2Box,
+            ToolbarColor3Box,
+            ToolbarColor4Box,
+            ToolbarColor5Box
+        };
+
+        for (var i = 0; i < combos.Length; i++)
+        {
+            var combo = combos[i];
+            combo.ItemsSource = null;
+            combo.ItemsSource = _colors;
+            combo.SelectedItem = _toolbarColors[i];
+        }
+    }
+
+    private void OnToolbarColorSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (sender is not System.Windows.Controls.ComboBox combo || combo.Tag is not int index)
+        {
+            return;
+        }
+
+        if (combo.SelectedItem is not ColorOption option)
+        {
+            return;
+        }
+
+        _toolbarColors[index] = option;
+        BuildColorPaletteButtons();
+        SaveSettings();
+    }
+
+    private Button CreateLibraryColorButton(ColorOption option)
+    {
+        var button = new Button
+        {
+            Style = (Style)FindResource("ToolButtonStyle"),
+            Width = 32,
+            Height = 32,
+            Margin = new Thickness(0, 4, 6, 4),
+            Content = new System.Windows.Shapes.Rectangle
+            {
+                Width = 16,
+                Height = 16,
+                RadiusX = 4,
+                RadiusY = 4,
+                Stroke = new SolidColorBrush(Color.FromArgb(34, 0, 0, 0)),
+                Fill = new SolidColorBrush(option.Color)
+            }
+        };
+
+        button.Click += (_, _) =>
+        {
+            _selectedColor = option.Color;
+            UpdateColorSwatch();
+            UpdateDrawingAttributes();
+            UpdateSelectedTextStyle();
+        };
+
+        return button;
+    }
+
+    private static bool TryParseRgbBox(string value, out int channel)
+    {
+        if (int.TryParse(value, out channel))
+        {
+            return channel >= 0 && channel <= 255;
+        }
+
+        return false;
+    }
+
+    private static bool TryParseColor(string value, out Color color)
+    {
+        try
+        {
+            var parsed = (Color)ColorConverter.ConvertFromString(value)!;
+            color = Color.FromArgb(255, parsed.R, parsed.G, parsed.B);
+            return true;
+        }
+        catch (FormatException)
+        {
+            color = Colors.White;
+            return false;
+        }
+    }
+
+    private void SaveSettings()
+    {
+        _appSettings.Hotkeys = _hotkeySettings;
+        _appSettings.ColorLibrary = _colors
+            .Select(option => option.Color.ToString())
+            .ToList();
+        _appSettings.ToolbarColors = _toolbarColors
+            .Select(option => option.Color.ToString())
+            .ToList();
+        _settingsStore.Save(_appSettings);
     }
 
     private void UpdateDrawingAttributes()
@@ -732,6 +1069,14 @@ public partial class MainWindow : Window
 
     private void OnWindowPreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
+        var source = e.OriginalSource as DependencyObject;
+        var positionInUiLayer = e.GetPosition(UiLayer);
+        if (ShouldRestrictToWhiteboard(source, positionInUiLayer))
+        {
+            e.Handled = true;
+            return;
+        }
+
         if (_toolMode == ToolMode.Text)
         {
             var moveHeld = IsMoveTextChordHeld();
@@ -780,17 +1125,6 @@ public partial class MainWindow : Window
                 ScheduleSave();
                 e.Handled = true;
             }
-            return;
-        }
-
-        if (_isSnipping && e.LeftButton == MouseButtonState.Pressed)
-        {
-            _snipStart = e.GetPosition(this);
-            UpdateSnipSelection(_snipStart, _snipStart);
-            SnipSelection.Visibility = Visibility.Visible;
-            SnipLayer.Visibility = Visibility.Visible;
-            CaptureMouse();
-            e.Handled = true;
             return;
         }
 
@@ -858,6 +1192,13 @@ public partial class MainWindow : Window
 
     private void OnWindowPreviewMouseMove(object sender, MouseEventArgs e)
     {
+        var source = e.OriginalSource as DependencyObject;
+        var positionInUiLayer = e.GetPosition(UiLayer);
+        if (!_isPlacingShape && ShouldRestrictToWhiteboard(source, positionInUiLayer))
+        {
+            return;
+        }
+
         if (_toolMode == ToolMode.Text)
         {
             var moveHeld = IsMoveTextChordHeld();
@@ -903,14 +1244,6 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!_isSnipping || !IsMouseCaptured || e.LeftButton != MouseButtonState.Pressed)
-        {
-            return;
-        }
-
-        var current = e.GetPosition(this);
-        UpdateSnipSelection(_snipStart, current);
-        e.Handled = true;
     }
 
     private void OnWindowPreviewKeyDown(object sender, KeyEventArgs e)
@@ -1016,6 +1349,13 @@ public partial class MainWindow : Window
 
     private async void OnWindowPreviewMouseUp(object sender, MouseButtonEventArgs e)
     {
+        var source = e.OriginalSource as DependencyObject;
+        var positionInUiLayer = e.GetPosition(UiLayer);
+        if (!_isPlacingShape && ShouldRestrictToWhiteboard(source, positionInUiLayer))
+        {
+            return;
+        }
+
         if (_toolMode == ToolMode.Text && _moveTextMode && !IsMoveTextChordHeld())
         {
             SetMoveTextMode(false);
@@ -1031,16 +1371,6 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!_isSnipping || !IsMouseCaptured || e.ChangedButton != MouseButton.Left)
-        {
-            return;
-        }
-
-        ReleaseMouseCapture();
-        var end = e.GetPosition(this);
-        var rect = new Rect(_snipStart, end);
-        await FinishSnipAsync(rect);
-        e.Handled = true;
     }
 
     private TextAnnotationControl CreateTextControl()
@@ -1292,6 +1622,282 @@ public partial class MainWindow : Window
         Canvas.SetTop(FontPalette, top + 320);
     }
 
+    private void ToggleWhiteboard()
+    {
+        SetWhiteboardVisible(WhiteboardPanel.Visibility != Visibility.Visible);
+    }
+
+    private void SetWhiteboardVisible(bool visible)
+    {
+        WhiteboardPanel.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        WhiteboardResizeThumb.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        WhiteboardGhost.Visibility = Visibility.Collapsed;
+        _whiteboardGhosting = false;
+        if (visible)
+        {
+            EnsureWhiteboardSize();
+            PositionWhiteboard();
+        }
+        else
+        {
+            UpdateWhiteboardClip();
+        }
+    }
+
+    private void EnsureWhiteboardSize()
+    {
+        var toolbarSize = GetToolbarSize();
+        if (_whiteboardWidth <= 0)
+        {
+            _whiteboardWidth = toolbarSize.Width;
+        }
+        _whiteboardWidth = Math.Max(toolbarSize.Width, _whiteboardWidth);
+    }
+
+    private System.Windows.Size GetToolbarSize()
+    {
+        var width = Toolbar.ActualWidth;
+        var height = Toolbar.ActualHeight;
+        if (width <= 0 || height <= 0)
+        {
+            Toolbar.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
+            if (width <= 0)
+            {
+                width = Toolbar.DesiredSize.Width;
+            }
+            if (height <= 0)
+            {
+                height = Toolbar.DesiredSize.Height;
+            }
+        }
+        if (width <= 0)
+        {
+            width = Toolbar.Width;
+        }
+        if (height <= 0)
+        {
+            height = Toolbar.Height;
+        }
+        return new System.Windows.Size(width, height);
+    }
+
+    private void PositionWhiteboard(bool updateClip = true)
+    {
+        if (WhiteboardPanel.Visibility != Visibility.Visible)
+        {
+            return;
+        }
+
+        var left = Canvas.GetLeft(Toolbar);
+        var top = Canvas.GetTop(Toolbar);
+        if (double.IsNaN(left))
+        {
+            left = 0;
+        }
+        if (double.IsNaN(top))
+        {
+            top = 0;
+        }
+
+        var toolbarSize = _toolbarDragging ? _toolbarDragSize : GetToolbarSize();
+        var height = toolbarSize.Height;
+        _whiteboardWidth = Math.Max(toolbarSize.Width, _whiteboardWidth);
+
+        var boardLeft = left + toolbarSize.Width + WhiteboardGap;
+        var boardTop = top;
+
+        PositionWhiteboardAt(boardLeft, boardTop, _whiteboardWidth, height, updateClip);
+    }
+
+    private void PositionWhiteboardAt(double left, double top, double width, double height, bool updateClip)
+    {
+        if (!_whiteboardPositionInitialized)
+        {
+            _whiteboardLeft = left;
+            _whiteboardTop = top;
+            _whiteboardPositionInitialized = true;
+        }
+        else
+        {
+            var deltaX = left - _whiteboardLeft;
+            var deltaY = top - _whiteboardTop;
+            if (Math.Abs(deltaX) > 0.01 || Math.Abs(deltaY) > 0.01)
+            {
+                MoveWhiteboardContent(deltaX, deltaY);
+                _whiteboardLeft = left;
+                _whiteboardTop = top;
+            }
+        }
+
+        WhiteboardPanel.Width = width;
+        WhiteboardPanel.Height = height;
+        Canvas.SetLeft(WhiteboardPanel, left);
+        Canvas.SetTop(WhiteboardPanel, top);
+
+        WhiteboardResizeThumb.Height = Math.Max(24, height - 16);
+        Canvas.SetLeft(WhiteboardResizeThumb, left + width - (WhiteboardResizeThumb.Width / 2));
+        Canvas.SetTop(WhiteboardResizeThumb, top + (height - WhiteboardResizeThumb.Height) / 2);
+
+        if (updateClip)
+        {
+            UpdateWhiteboardClip();
+        }
+    }
+
+    private void MoveWhiteboardContent(double deltaX, double deltaY)
+    {
+        if (Math.Abs(deltaX) < 0.01 && Math.Abs(deltaY) < 0.01)
+        {
+            return;
+        }
+
+        var matrix = new Matrix(1, 0, 0, 1, deltaX, deltaY);
+        if (InkSurface.Strokes.Count > 0)
+        {
+            InkSurface.Strokes.Transform(matrix, false);
+        }
+
+        foreach (var shape in ShapeLayer.Children.OfType<ShapeAnnotationControl>())
+        {
+            var start = new Point(shape.StartAbsolute.X + deltaX, shape.StartAbsolute.Y + deltaY);
+            var end = new Point(shape.EndAbsolute.X + deltaX, shape.EndAbsolute.Y + deltaY);
+            shape.SetAbsolutePoints(start, end);
+        }
+
+        foreach (var text in TextLayer.Children.OfType<TextAnnotationControl>())
+        {
+            var left = Canvas.GetLeft(text);
+            var top = Canvas.GetTop(text);
+            if (double.IsNaN(left))
+            {
+                left = 0;
+            }
+            if (double.IsNaN(top))
+            {
+                top = 0;
+            }
+            Canvas.SetLeft(text, left + deltaX);
+            Canvas.SetTop(text, top + deltaY);
+        }
+    }
+
+    private void BeginWhiteboardGhost()
+    {
+        if (WhiteboardPanel.Visibility != Visibility.Visible)
+        {
+            return;
+        }
+
+        EnsureWhiteboardSize();
+        var toolbarSize = _toolbarDragSize.Width > 0 ? _toolbarDragSize : GetToolbarSize();
+        var toolbarLeft = Canvas.GetLeft(Toolbar);
+        var toolbarTop = Canvas.GetTop(Toolbar);
+        if (double.IsNaN(toolbarLeft))
+        {
+            toolbarLeft = 0;
+        }
+        if (double.IsNaN(toolbarTop))
+        {
+            toolbarTop = 0;
+        }
+
+        _whiteboardGhostLeft = toolbarLeft + toolbarSize.Width + WhiteboardGap;
+        _whiteboardGhostTop = toolbarTop;
+        WhiteboardGhost.Width = _whiteboardWidth;
+        WhiteboardGhost.Height = toolbarSize.Height;
+        Canvas.SetLeft(WhiteboardGhost, _whiteboardGhostLeft);
+        Canvas.SetTop(WhiteboardGhost, _whiteboardGhostTop);
+        WhiteboardGhost.Visibility = Visibility.Visible;
+        _whiteboardGhosting = true;
+    }
+
+    private void UpdateWhiteboardGhost()
+    {
+        if (!_whiteboardGhosting)
+        {
+            return;
+        }
+
+        var toolbarSize = _toolbarDragSize.Width > 0 ? _toolbarDragSize : GetToolbarSize();
+        var toolbarLeft = Canvas.GetLeft(Toolbar);
+        var toolbarTop = Canvas.GetTop(Toolbar);
+        if (double.IsNaN(toolbarLeft))
+        {
+            toolbarLeft = 0;
+        }
+        if (double.IsNaN(toolbarTop))
+        {
+            toolbarTop = 0;
+        }
+
+        _whiteboardGhostLeft = toolbarLeft + toolbarSize.Width + WhiteboardGap;
+        _whiteboardGhostTop = toolbarTop;
+        WhiteboardGhost.Width = _whiteboardWidth;
+        WhiteboardGhost.Height = toolbarSize.Height;
+        Canvas.SetLeft(WhiteboardGhost, _whiteboardGhostLeft);
+        Canvas.SetTop(WhiteboardGhost, _whiteboardGhostTop);
+    }
+
+    private void CommitWhiteboardGhost()
+    {
+        if (!_whiteboardGhosting)
+        {
+            return;
+        }
+
+        WhiteboardGhost.Visibility = Visibility.Collapsed;
+        _whiteboardGhosting = false;
+
+        var height = WhiteboardGhost.Height > 0 ? WhiteboardGhost.Height : WhiteboardPanel.Height;
+        PositionWhiteboardAt(_whiteboardGhostLeft, _whiteboardGhostTop, _whiteboardWidth, height, true);
+    }
+
+    private void UpdateWhiteboardClip()
+    {
+        if (WhiteboardPanel.Visibility != Visibility.Visible)
+        {
+            if (_whiteboardClipApplied)
+            {
+                InkSurface.Clip = null;
+                ShapeLayer.Clip = null;
+                TextLayer.Clip = null;
+                _whiteboardClipApplied = false;
+            }
+            return;
+        }
+
+        var left = Canvas.GetLeft(WhiteboardPanel);
+        var top = Canvas.GetTop(WhiteboardPanel);
+        if (double.IsNaN(left))
+        {
+            left = 0;
+        }
+        if (double.IsNaN(top))
+        {
+            top = 0;
+        }
+
+        var width = WhiteboardPanel.ActualWidth > 0 ? WhiteboardPanel.ActualWidth : WhiteboardPanel.Width;
+        var height = WhiteboardPanel.ActualHeight > 0 ? WhiteboardPanel.ActualHeight : WhiteboardPanel.Height;
+        if (width <= 0 || height <= 0)
+        {
+            return;
+        }
+
+        var radius = WhiteboardPanel.CornerRadius.TopLeft;
+        _whiteboardClip.Rect = new Rect(left, top, width, height);
+        _whiteboardClip.RadiusX = radius;
+        _whiteboardClip.RadiusY = radius;
+
+        if (!_whiteboardClipApplied)
+        {
+            InkSurface.Clip = _whiteboardClip;
+            ShapeLayer.Clip = _whiteboardClip;
+            TextLayer.Clip = _whiteboardClip;
+            _whiteboardClipApplied = true;
+        }
+    }
+
     private Button CreateColorPaletteButton(ColorOption option)
     {
         var button = new Button
@@ -1541,6 +2147,98 @@ public partial class MainWindow : Window
         }
 
         return false;
+    }
+
+    private bool IsWithinSettingsPanel(DependencyObject? source, Point positionInUiLayer)
+    {
+        if (SettingsPanel.Visibility != Visibility.Visible)
+        {
+            return false;
+        }
+
+        if (SettingsPanel.IsMouseOver)
+        {
+            return true;
+        }
+
+        var left = Canvas.GetLeft(SettingsPanel);
+        var top = Canvas.GetTop(SettingsPanel);
+        if (double.IsNaN(left))
+        {
+            left = 0;
+        }
+        if (double.IsNaN(top))
+        {
+            top = 0;
+        }
+
+        var bounds = new Rect(left, top, SettingsPanel.ActualWidth, SettingsPanel.ActualHeight);
+        if (bounds.Contains(positionInUiLayer))
+        {
+            return true;
+        }
+
+        var current = source;
+        while (current != null)
+        {
+            if (ReferenceEquals(current, SettingsPanel))
+            {
+                return true;
+            }
+
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return false;
+    }
+
+    private bool IsWithinWhiteboard(Point positionInUiLayer)
+    {
+        if (WhiteboardPanel.Visibility != Visibility.Visible)
+        {
+            return false;
+        }
+
+        var left = Canvas.GetLeft(WhiteboardPanel);
+        var top = Canvas.GetTop(WhiteboardPanel);
+        if (double.IsNaN(left))
+        {
+            left = 0;
+        }
+        if (double.IsNaN(top))
+        {
+            top = 0;
+        }
+
+        var width = WhiteboardPanel.ActualWidth > 0 ? WhiteboardPanel.ActualWidth : WhiteboardPanel.Width;
+        var height = WhiteboardPanel.ActualHeight > 0 ? WhiteboardPanel.ActualHeight : WhiteboardPanel.Height;
+        if (width <= 0 || height <= 0)
+        {
+            return false;
+        }
+
+        var bounds = new Rect(left, top, width, height);
+        return bounds.Contains(positionInUiLayer);
+    }
+
+    private bool ShouldRestrictToWhiteboard(DependencyObject? source, Point positionInUiLayer)
+    {
+        if (WhiteboardPanel.Visibility != Visibility.Visible || _toolMode == ToolMode.Cursor)
+        {
+            return false;
+        }
+
+        if (IsWithinWhiteboard(positionInUiLayer))
+        {
+            return false;
+        }
+
+        return !IsWithinToolbar(source, positionInUiLayer)
+               && !IsWithinShapePalette(source, positionInUiLayer)
+               && !IsWithinInkPalette(source, positionInUiLayer)
+               && !IsWithinColorPalette(source, positionInUiLayer)
+               && !IsWithinFontPalette(source, positionInUiLayer)
+               && !IsWithinSettingsPanel(source, positionInUiLayer);
     }
 
     private void SelectText(TextAnnotationControl control)
@@ -1843,6 +2541,7 @@ public partial class MainWindow : Window
             opacityAnim.Completed += (_, _) => content.Visibility = Visibility.Collapsed;
             scale.BeginAnimation(ScaleTransform.ScaleYProperty, scaleAnim);
             content.BeginAnimation(OpacityProperty, opacityAnim);
+            PositionWhiteboard();
             return;
         }
 
@@ -1851,6 +2550,7 @@ public partial class MainWindow : Window
         var showOpacity = new DoubleAnimation(1, duration) { EasingFunction = easing };
         scale.BeginAnimation(ScaleTransform.ScaleYProperty, showScale);
         content.BeginAnimation(OpacityProperty, showOpacity);
+        PositionWhiteboard();
     }
 
     private void CloseAllPalettes()
@@ -1861,115 +2561,7 @@ public partial class MainWindow : Window
         FontPalette.Visibility = Visibility.Collapsed;
     }
 
-    private void StartSnip()
-    {
-        if (!EnsureScreenshotFolder())
-        {
-            return;
-        }
-
-        _isSnipping = true;
-        SnipLayer.Visibility = Visibility.Visible;
-        SnipSelection.Visibility = Visibility.Visible;
-        SnipSelection.Width = 0;
-        SnipSelection.Height = 0;
-        Cursor = Cursors.Cross;
-    }
-
-    private void UpdateSnipSelection(Point start, Point end)
-    {
-        var rect = new Rect(start, end);
-        var left = Math.Min(rect.Left, rect.Right);
-        var top = Math.Min(rect.Top, rect.Bottom);
-        var width = Math.Abs(rect.Width);
-        var height = Math.Abs(rect.Height);
-
-        Canvas.SetLeft(SnipSelection, left);
-        Canvas.SetTop(SnipSelection, top);
-        SnipSelection.Width = width;
-        SnipSelection.Height = height;
-    }
-
-    private async Task FinishSnipAsync(Rect rect)
-    {
-        SnipSelection.Visibility = Visibility.Collapsed;
-        SnipLayer.Visibility = Visibility.Collapsed;
-
-        if (rect.Width < 2 || rect.Height < 2)
-        {
-            _isSnipping = false;
-            SetCursorForTool(_toolMode);
-            return;
-        }
-
-        var previousOpacity = Opacity;
-        Opacity = 0;
-        await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
-        await Task.Delay(40);
-
-        try
-        {
-            SaveSnip(rect);
-        }
-        finally
-        {
-            Opacity = previousOpacity;
-            _isSnipping = false;
-            SetCursorForTool(_toolMode);
-        }
-    }
-
-    private void SaveSnip(Rect rect)
-    {
-        if (string.IsNullOrWhiteSpace(_screenshotFolder))
-        {
-            return;
-        }
-
-        var topLeft = PointToScreen(new Point(rect.Left, rect.Top));
-        var bottomRight = PointToScreen(new Point(rect.Right, rect.Bottom));
-        var x = (int)Math.Round(Math.Min(topLeft.X, bottomRight.X));
-        var y = (int)Math.Round(Math.Min(topLeft.Y, bottomRight.Y));
-        var width = (int)Math.Round(Math.Abs(bottomRight.X - topLeft.X));
-        var height = (int)Math.Round(Math.Abs(bottomRight.Y - topLeft.Y));
-
-        if (width <= 0 || height <= 0)
-        {
-            return;
-        }
-
-        Directory.CreateDirectory(_screenshotFolder);
-        var fileName = $"EpicPen_{DateTime.Now:yyyyMMdd_HHmmss}.png";
-        var path = Path.Combine(_screenshotFolder, fileName);
-
-        using var bmp = new Drawing.Bitmap(width, height, DrawingImaging.PixelFormat.Format32bppArgb);
-        using var graphics = Drawing.Graphics.FromImage(bmp);
-        graphics.CopyFromScreen(x, y, 0, 0, new Drawing.Size(width, height), Drawing.CopyPixelOperation.SourceCopy);
-        bmp.Save(path, DrawingImaging.ImageFormat.Png);
-    }
-
-    private bool EnsureScreenshotFolder()
-    {
-        if (!string.IsNullOrWhiteSpace(_screenshotFolder) && Directory.Exists(_screenshotFolder))
-        {
-            return true;
-        }
-
-        using var dialog = new Forms.FolderBrowserDialog
-        {
-            Description = "Choose a folder for screenshots",
-            UseDescriptionForTitle = true
-        };
-
-        var result = dialog.ShowDialog();
-        if (result != Forms.DialogResult.OK || string.IsNullOrWhiteSpace(dialog.SelectedPath))
-        {
-            return false;
-        }
-
-        _screenshotFolder = dialog.SelectedPath;
-        return true;
-    }
+    // Screenshot functionality removed.
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
@@ -2177,6 +2769,7 @@ public partial class MainWindow : Window
     private sealed record ColorOption(string Name, Color Color)
     {
         public override string ToString() => Name;
+        public SolidColorBrush Brush => new(Color);
     }
 
 

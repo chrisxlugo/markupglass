@@ -10,6 +10,30 @@
         Topmost="True"
         ShowInTaskbar="True">
 <Grid Background="Transparent">
+    <Canvas x:Name="WhiteboardLayer"
+            Background="Transparent"
+            IsHitTestVisible="False">
+      <Border x:Name="WhiteboardPanel"
+              Width="64"
+              Height="64"
+              Background="#FFFFFF"
+              BorderBrush="#33000000"
+              BorderThickness="1"
+              CornerRadius="{StaticResource ToolbarCorner}"
+              Visibility="Collapsed">
+        <Border.Effect>
+          <DropShadowEffect BlurRadius="12" ShadowDepth="0" Color="#33000000" />
+        </Border.Effect>
+      </Border>
+      <Border x:Name="WhiteboardGhost"
+              Width="64"
+              Height="64"
+              Background="Transparent"
+              BorderBrush="#66FFFFFF"
+              BorderThickness="1"
+              CornerRadius="{StaticResource ToolbarCorner}"
+              Visibility="Collapsed" />
+    </Canvas>
     <InkCanvas x:Name="InkSurface"
                Background="Transparent"
                EditingMode="Ink"
@@ -88,8 +112,8 @@
                 <Ellipse x:Name="ShapeIconEllipse" Width="14" Height="14" Stroke="#E6E6E6" StrokeThickness="2" Visibility="Collapsed" />
               </Grid>
             </Button>
-            <Button x:Name="CameraButton" Style="{StaticResource ToolButtonStyle}" ToolTip="Screenshot">
-              <TextBlock Style="{StaticResource ToolIconStyle}" Text="&#xE114;" />
+            <Button x:Name="WhiteboardButton" Style="{StaticResource ToolButtonStyle}" ToolTip="Whiteboard">
+              <TextBlock Style="{StaticResource ToolIconStyle}" Text="&#xE18F;" />
             </Button>
 
             <Separator Style="{StaticResource ToolbarSeparatorStyle}" />
@@ -117,6 +141,22 @@
           </StackPanel>
         </StackPanel>
       </Border>
+      <Thumb x:Name="WhiteboardResizeThumb"
+             Width="10"
+             Height="60"
+             Cursor="SizeWE"
+             Visibility="Collapsed">
+        <Thumb.Template>
+          <ControlTemplate TargetType="Thumb">
+            <Border Background="Transparent">
+              <Border Width="2"
+                      Background="#66000000"
+                      CornerRadius="1"
+                      HorizontalAlignment="Center" />
+            </Border>
+          </ControlTemplate>
+        </Thumb.Template>
+      </Thumb>
     </Canvas>
     <Canvas x:Name="ShapePaletteLayer" IsHitTestVisible="True">
       <Border x:Name="ShapePalette"
@@ -190,6 +230,14 @@
               Canvas.Top="140">
         <Border.Resources>
           <Style TargetType="TextBox" BasedOn="{StaticResource SettingsTextBoxStyle}" />
+          <DataTemplate x:Key="ColorSwatchTemplate">
+            <Border Width="18"
+                    Height="18"
+                    CornerRadius="4"
+                    BorderBrush="#33000000"
+                    BorderThickness="1"
+                    Background="{Binding Brush}" />
+          </DataTemplate>
         </Border.Resources>
         <Border.Effect>
           <DropShadowEffect BlurRadius="24" ShadowDepth="0" Color="#66000000" />
@@ -230,11 +278,11 @@
             </Grid>
           </Border>
           <ScrollViewer Grid.Row="1" Padding="20,20,32,20" VerticalScrollBarVisibility="Auto">
-            <StackPanel>
-              <TextBlock Text="Hotkeys"
-                         Foreground="#FFFFFF"
-                         FontWeight="SemiBold"
-                         Margin="0,0,0,12" />
+              <StackPanel>
+                <TextBlock Text="Hotkeys"
+                           Foreground="#FFFFFF"
+                           FontWeight="SemiBold"
+                           Margin="0,0,0,12" />
               <StackPanel>
                 <Grid Margin="0,4">
                   <Grid.ColumnDefinitions>
@@ -342,6 +390,40 @@
                 </Grid>
               </StackPanel>
               <Border Height="1" Background="#22FFFFFF" Margin="0,16,0,16" />
+              <TextBlock Text="Colors"
+                         Foreground="#FFFFFF"
+                         FontWeight="SemiBold"
+                         Margin="0,0,0,12" />
+              <TextBlock Text="Add custom color (RGB)"
+                         Foreground="#CFCFCF"
+                         Margin="0,0,0,6" />
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                <TextBox x:Name="ColorRedBox" Width="60" Margin="0,0,8,0" />
+                <TextBox x:Name="ColorGreenBox" Width="60" Margin="0,0,8,0" />
+                <TextBox x:Name="ColorBlueBox" Width="60" Margin="0,0,8,0" />
+                <Button x:Name="AddColorButton" Content="Add" Style="{StaticResource ActionButtonStyle}"
+                        MinWidth="64" Height="28" Padding="12,0" />
+              </StackPanel>
+              <TextBlock Text="Toolbar colors (5)"
+                         Foreground="#CFCFCF"
+                         Margin="0,0,0,6" />
+              <UniformGrid Columns="5" Margin="0,0,0,12">
+                <ComboBox x:Name="ToolbarColor1Box" Style="{StaticResource PickerComboBoxStyle}"
+                          ItemTemplate="{StaticResource ColorSwatchTemplate}" />
+                <ComboBox x:Name="ToolbarColor2Box" Style="{StaticResource PickerComboBoxStyle}"
+                          ItemTemplate="{StaticResource ColorSwatchTemplate}" />
+                <ComboBox x:Name="ToolbarColor3Box" Style="{StaticResource PickerComboBoxStyle}"
+                          ItemTemplate="{StaticResource ColorSwatchTemplate}" />
+                <ComboBox x:Name="ToolbarColor4Box" Style="{StaticResource PickerComboBoxStyle}"
+                          ItemTemplate="{StaticResource ColorSwatchTemplate}" />
+                <ComboBox x:Name="ToolbarColor5Box" Style="{StaticResource PickerComboBoxStyle}"
+                          ItemTemplate="{StaticResource ColorSwatchTemplate}" />
+              </UniformGrid>
+              <TextBlock Text="Color library"
+                         Foreground="#CFCFCF"
+                         Margin="0,0,0,6" />
+              <WrapPanel x:Name="ColorLibraryPanel" />
+              <Border Height="1" Background="#22FFFFFF" Margin="0,16,0,16" />
               <TextBlock Text="Help"
                          Foreground="#FFFFFF"
                          FontWeight="SemiBold"
@@ -409,15 +491,6 @@
         </Border.Effect>
         <StackPanel x:Name="FontPalettePanel" />
       </Border>
-    </Canvas>
-    <Canvas x:Name="SnipLayer" IsHitTestVisible="False">
-      <Rectangle x:Name="SnipSelection"
-                 Stroke="{DynamicResource {x:Static SystemColors.HighlightBrushKey}}"
-                 StrokeThickness="1"
-                 Fill="#33007DFF"
-                 RadiusX="2"
-                 RadiusY="2"
-                 Visibility="Collapsed" />
     </Canvas>
   </Grid>
 </Window>
