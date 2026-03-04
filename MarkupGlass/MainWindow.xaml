@@ -179,7 +179,7 @@
     </Canvas>
         <Canvas x:Name="SettingsLayer" IsHitTestVisible="True">
       <Border x:Name="SettingsPanel"
-              Background="#F0262A2F"
+              Background="#F01A1D22"
               BorderBrush="#33FFFFFF"
               BorderThickness="1"
               CornerRadius="20"
@@ -201,7 +201,7 @@
             <RowDefinition Height="Auto" />
           </Grid.RowDefinitions>
           <Border x:Name="SettingsHeader"
-                  Background="#2F3136"
+                  Background="#22252A"
                   CornerRadius="20,20,0,0"
                   Padding="18,14">
             <Grid>
@@ -222,7 +222,7 @@
                       Grid.Column="1"
                       Width="28"
                       Height="28"
-                      Background="#10FFFFFF"
+                      Background="#0CFFFFFF"
                       BorderThickness="0"
                       ToolTip="Close">
                 <TextBlock FontFamily="Segoe Fluent Icons" FontSize="12" Foreground="#FFFFFF" Text="&#xE8BB;" />
